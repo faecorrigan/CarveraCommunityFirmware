@@ -37,13 +37,11 @@ int XModem::inbytes(char **buf, int size, unsigned int timeout_ms, StreamOutput*
 }
 
 void XModem::flush_input(StreamOutput* stream) {
-    while (inbyte(TIMEOUT_MS, stream) >= 0)
+    while (inbyte(0, stream) >= 0)
         continue;
 }
 
 void XModem::cancel_transfer(StreamOutput* stream) {
-    stream->putc(CAN);
-    stream->putc(CAN);
     stream->putc(CAN);
     flush_input(stream);
 }
@@ -54,7 +52,7 @@ void XModem::set_serial_rx_irq(bool enable) {
     PublicData::set_value(atc_handler_checksum, set_serial_rx_irq_checksum, &enable_irq);
 }
 
-unsigned int XModem::crc16_ccitt(unsigned char *data, unsigned int len)
+unsigned short XModem::crc16_ccitt_update(unsigned short crc, unsigned char *data, unsigned int len)
 {
 	static const unsigned short crc_table[] = {
 		0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50a5, 0x60c6, 0x70e7,
@@ -92,19 +90,18 @@ unsigned int XModem::crc16_ccitt(unsigned char *data, unsigned int len)
 	};
 
 	unsigned char tmp;
-	unsigned short crc = 0;
 
 	for (unsigned int i = 0; i < len; i ++) {
         tmp = ((crc >> 8) ^ data[i]) & 0xff;
-        crc = ((crc << 8) ^ crc_table[tmp]) & 0xffff;
+        crc = ((crc << 8) ^ crc_table[tmp]);
 	}
 
-	return crc & 0xffff;
+	return crc;
 }
 
 int XModem::check_crc(int crc, unsigned char *data, unsigned int len) {
     if (crc) {
-        unsigned short crc = crc16_ccitt(data, len);
+        unsigned short crc = crc16_ccitt_update(0, data, len);
         unsigned short tcrc = (data[len] << 8) + data[len+1];
         if (crc == tcrc)
             return 1;
@@ -186,17 +183,12 @@ _exit:
 }
 
 bool XModem::upload(const std::string& filename, StreamOutput* stream) {
-    unsigned char *p;
     char *recv_buff;
-    int bufsz, crc = 0, is_stx = 0;
-    unsigned char trychar = 'C';
-    unsigned char packetno = 1;
-    int c, len = 0;
-    int retry = 0;
-    int retrans = MAXRETRANS;
-    int timeouts = MAXRETRANS;
+    int expected_length, is_stx = 0;
+	unsigned short crc = 0;
+    int c, length = 0;
     int recv_count = 0;
-    bool md5_received = false;
+	bool md5_received = false;
     uint32_t u32filesize = 0;
 
 	memset(info_msg, 0, sizeof(info_msg));
@@ -249,110 +241,121 @@ bool XModem::upload(const std::string& filename, StreamOutput* stream) {
     	sprintf(info_msg, "Error: failed to open file [%s]!\r\n", fd == NULL ? filename.substr(0, 30).c_str() : md5_filename.substr(0, 30).c_str() );
     	goto upload_error;
     }
+
+	stream->putc('C');
 	
     for (;;) {
-        for (retry = 0; retry < MAXRETRANS; ++retry) {  // approx 3 seconds allowed to make connection
-            if (trychar)
-            	stream->putc(trychar);
-            if ((c = inbyte(TIMEOUT_MS, stream)) >= 0) {
-            	retry = 0;
-            	switch (c) {
-                case SOH:
-                    bufsz = 128;
-                    is_stx = 0;
-                    goto start_recv;
-                case STX:
-                    bufsz = 8192;
-                    is_stx = 1;
-                    goto start_recv;
-                case EOT:
-                    stream->putc(ACK);
-                    flush_input(stream);
-                    goto upload_success; /* normal end */
-                case CAN:
-                    if ((c = inbyte(TIMEOUT_MS, stream)) == CAN) {
-                        stream->putc(ACK);
-                        flush_input(stream);
-                    	sprintf(info_msg, "Info: Upload canceled by remote!\r\n");
-                        goto upload_error;
-                    }
-                    goto upload_error;
-                    break;
-                default:
-                    break;
-                }
-            }
-			else
-			{
-				safe_delay_ms(10);
-			}
-        }
+		int retry = 0;
 
-        if (trychar == 'C') {
-            trychar = NAK;
-            continue;
-        }
+		if ((c = inbyte(TIMEOUT_MS, stream)) >= 0) {
+			switch (c) {
+			case SOH:
+				expected_length = 128 + 2; // + CRC16
+				is_stx = 0;
+				goto start_recv;
+			case STX:
+				expected_length = 8192 + 2; // + CRC16
+				is_stx = 1;
+				goto start_recv;
+			case EOT:
+				stream->putc(ACK);
+				goto upload_success; /* normal end */
+			case CAN:
+				stream->putc(ACK);
+				sprintf(info_msg, "Info: Upload canceled by remote!\r\n");
+				goto upload_error;
+				break;
+			default:
+				break;
+			}
+		}
+
         cancel_transfer(stream);
-		sprintf(info_msg, "Error: upload sync error! get char [%d], retry [%d]!\r\n", c, retry);
+		sprintf(info_msg, "Error: upload sync error! get char [%d]\r\n", c);
         goto upload_error;
 
     start_recv:
-        if (trychar == 'C')
-            crc = 1;
-        trychar = 0;
-        p = xbuff;
-        *p++ = c;
+		size_t header_size = is_stx ? 4 : 3;
+		size_t file_position;
+		int packetno;
+		crc = 0;
 
-        recv_count = 1 + bufsz + (crc ? 1 : 0) + 3 + is_stx;
+		retry = 1000;
 
-        timeouts = MAXRETRANS;
+		do {
+			c = inbytes(&recv_buff, header_size, TIMEOUT_MS, stream);
+		} while (c == 0 && retry--);
 
-        while (recv_count > 0) {
-        	c = inbytes(&recv_buff, recv_count, TIMEOUT_MS, stream);
-        	if (c < 0) {
-        		safe_delay_ms(10);
-        		timeouts --;
-        		if (timeouts < 0) {
-            		goto reject;
-        		}
-        	} else {
-        		timeouts = MAXRETRANS;
-				
-        		memcpy(p, recv_buff, c);
-        		p += c;
+		if (c != header_size) {
+			sprintf(info_msg, "Error: header size mismatch: %i != %i\r\n", c, header_size);
+			goto upload_error;
+		}
 
-            	recv_count -= c;
-        	}
-        }
+		if (recv_buff[0] != (unsigned char)(~recv_buff[1])) {
+			sprintf(info_msg, "Error: packet number error\r\n");
+			goto upload_error;	
+		}
 
-        len = is_stx ? (xbuff[3] << 8 | xbuff[4]) : xbuff[3];
-        if (!md5_received && xbuff[1] == 0 && xbuff[1] == (unsigned char)(~xbuff[2])
-        		&& check_crc(crc, &xbuff[3], bufsz + 1 + is_stx) && len == 32) {
-        	// received md5
-        	if (NULL != fd_md5) {
-    			fwrite(&xbuff[4 + is_stx], sizeof(char), 32, fd_md5);
-        	}
-            THEKERNEL.call_event(ON_IDLE);
-            stream->putc(ACK);
-            md5_received = true;
-            continue;
-        } else if (xbuff[1] == (unsigned char)(~xbuff[2]) &&
-        		xbuff[1] == packetno && check_crc(crc, &xbuff[3], bufsz + 1 + is_stx)) {
+		packetno = recv_buff[0];
 
-			fwrite(&xbuff[4 + is_stx], sizeof(char), len, fd);
-			u32filesize += len;
-			++ packetno;
-			retrans = MAXRETRANS + 1;
-			THEKERNEL.call_event(ON_IDLE);
-            stream->putc(ACK);
-            continue;
-        }
-    reject:
-		stream->putc(NAK);
-		if (-- retrans <= 0) {
-            cancel_transfer(stream);
-        	sprintf(info_msg, "Error: too many retry error!\r\n");
-            goto upload_error; /* too many retry error */
+		if (is_stx) {
+			length = recv_buff[2] * 256 + recv_buff[3];
+		} else {
+			length = recv_buff[2];
+		}
+
+		crc = crc16_ccitt_update(crc, (unsigned char*)recv_buff + 2, is_stx ? 2 : 1);
+
+		// save position in case we need to rewind
+		file_position = ftell(fd);
+
+		recv_count = 0;
+
+		while (recv_count < expected_length) {
+			retry = 1000;
+
+			do {
+				c = inbytes(&recv_buff, expected_length - recv_count, TIMEOUT_MS, stream);
+			} while (c == 0 && retry--);
+
+			if (c < 0) {
+				sprintf(info_msg, "Error: could not receive data\r\n");
+				goto upload_error;
+			}
+
+			recv_count += c;
+
+			crc = crc16_ccitt_update(crc, (unsigned char*)recv_buff, c);
+
+			if (packetno == 0 && !md5_received) {
+				// packet number 0 contains MD5
+				// packet number might wrap around
+				if (length != 32 || c < 32) {
+					sprintf(info_msg, "Error: could not parse md5 packet\r\n");
+					goto upload_error;	
+				}
+
+				strncpy(md5_str, recv_buff, 32);
+				fwrite(md5_str, sizeof(char), 32, fd_md5);
+
+				md5_received = true;
+			} else {
+				size_t bytes_to_write = c;
+
+				if (recv_count >= length) {
+					size_t excess_data = recv_count - c;
+					bytes_to_write = (length > excess_data) ? (length - excess_data) : 0;
+				}
+
+				u32filesize += fwrite(recv_buff, sizeof(char), bytes_to_write, fd);
+			}
+		}
+
+		if (crc == 0) {
+			stream->putc(ACK);
+		} else {
+			stream->putc(NAK);
+			fseek(fd, file_position, SEEK_SET);
 		}
     }
 
@@ -367,7 +370,9 @@ upload_error:
 		fd_md5 = NULL;
 		remove(md5_filename.c_str());
 	}
+
 	flush_input(stream);
+
     if (stream->type() == 0) {
     	set_serial_rx_irq(true);
     }
@@ -383,10 +388,12 @@ upload_success:
 		fclose(fd);
 		fd = NULL;
 	}
+
 	if (fd_md5 != NULL) {
 		fclose(fd_md5);
 		fd_md5 = NULL;
 	}
+	
 	flush_input(stream);
 
     if (stream->type() == 0) {
@@ -410,22 +417,21 @@ upload_success:
 }
 
 bool XModem::download(const std::string& filename, StreamOutput* stream) {
-	int bufsz = 8192;
+	int block_size = 8192;
+	int chunk_size = XBUFF_SIZE - 8;
     int crc = 0, is_stx = 1;
     unsigned char packetno = 0;
-    int i, c = 0;
-    int retry = 0;
-    bool resend = true;
+    int c = 0;
 
     // open file
-	unsigned char md5_sent = 0;
 	memset(info_msg, 0, sizeof(info_msg));
     string md5_filename = change_to_md5_path(filename);
     string lz_filename = change_to_lz_path(filename);
 
 	// diasble irq
     if (stream->type() == 0) {
-    	bufsz = 128;
+    	block_size = 128;
+		chunk_size = 128;
     	is_stx = 0;
     	set_serial_rx_irq(false);
     }
@@ -440,11 +446,9 @@ bool XModem::download(const std::string& filename, StreamOutput* stream) {
 
 	THEKERNEL.set_uploading(true);
 
-    char md5_str[64];
-
     FILE *fd = fopen(md5_filename.c_str(), "rb");
     if (fd != NULL) {
-        fread(md5_str, sizeof(char), 64, fd);
+        fgets(md5_str, sizeof(md5_str), fd);
         fclose(fd);
         fd = NULL;
     } else {
@@ -474,123 +478,98 @@ bool XModem::download(const std::string& filename, StreamOutput* stream) {
 			goto download_error;
 	    }
 	}
-    
 
-    for(;;) {
-		for (retry = 0; retry < MAXRETRANS; ++retry) {
-			if ((c = inbyte(TIMEOUT_MS, stream)) >= 0) {
-				retry = 0;
-				switch (c) {
-				case 'C':
-					crc = 1;
-					goto start_trans;
-				case NAK:
-					crc = 0;
-					goto start_trans;
-				case CAN:
-					if ((c = inbyte(TIMEOUT_MS, stream)) == CAN) {
-						stream->putc(ACK);
-						flush_input(stream);
-				    	sprintf(info_msg, "Info: canceled by remote!\r\n");
-				        goto download_error;
-					}
-					break;
-				default:
-					break;
-				}
+	// Wait for C, NAK or CAN
+	if ((c = inbyte(TIMEOUT_MS, stream)) >= 0) {
+		switch (c) {
+			case 'C':
+				crc = true;
+				break;
+			case NAK:
+				crc = false;
+				break;
+			case CAN:
+				stream->putc(ACK);
+				flush_input(stream);
+				sprintf(info_msg, "Info: canceled by remote!\r\n");
+				goto download_error;
+			default:
+				cancel_transfer(stream);
+				goto download_error;
 			}
-			else
-			{
-				safe_delay_ms(10);
-			}
-		}
-        cancel_transfer(stream);
-		sprintf(info_msg, "Error: download sync error! get char [%02X], retry [%d]!\r\n", c, retry);
-        goto download_error;
-
-		for(;;) {
-		start_trans:
-			if (packetno == 0 && md5_sent == 0) {
-				c = strlen(md5_str);
-				memcpy(&xbuff[4 + is_stx], md5_str, c);
-				md5_sent = 1;
-			} else {
-				c = fread(&xbuff[4 + is_stx], sizeof(char), bufsz, fd);
-				if (c <= 0) {
-					for (retry = 0; retry < MAXRETRANS; ++retry) {
-						stream->putc(EOT);
-						if ((c = inbyte(TIMEOUT_MS, stream)) == ACK) break;
-					}
-					flush_input(stream);
-					if (c == ACK) {
-						goto download_success;
-					} else {
-						sprintf(info_msg, "Error: get finish ACK error!\r\n");
-				        goto download_error;
-					}
-				}
-			}
-			xbuff[0] = is_stx ? STX : SOH;
-			xbuff[1] = packetno;
-			xbuff[2] = ~packetno;
-			xbuff[3] = is_stx ? c >> 8 : c;
-			if (is_stx) {
-				xbuff[4] = c & 0xff;
-			}
-			if (c < bufsz) {
-				memset(&xbuff[4 + is_stx + c], CTRLZ, bufsz - c);
-			}
-
-			if (crc) {
-				unsigned short ccrc = crc16_ccitt(&xbuff[3], bufsz + 1 + is_stx);
-				xbuff[bufsz + 4 + is_stx] = (ccrc >> 8) & 0xFF;
-				xbuff[bufsz + 5 + is_stx] = ccrc & 0xFF;
-			} else {
-				unsigned char ccks = 0;
-				for (i = 3; i < bufsz + 1 + is_stx; ++i) {
-					ccks += xbuff[i];
-				}
-				xbuff[bufsz + 4 + is_stx] = ccks;
-			}
-
-			resend = true;
-			for (retry = 0; retry < MAXRETRANS; ++retry) {
-				if (resend) {
-					stream->puts((char *)xbuff, bufsz + 5 + is_stx + (crc ? 1:0));
-					resend = false;
-				}
-				if ((c = inbyte(TIMEOUT_MS, stream)) >= 0 ) {
-					retry = 0;
-					switch (c) {
-					case ACK:
-						++packetno;
-						goto start_trans;
-					case CAN:
-						if ((c = inbyte(TIMEOUT_MS, stream)) == CAN) {
-							stream->putc(ACK);
-							flush_input(stream);
-					    	sprintf(info_msg, "Info: canceled by remote!\r\n");
-					        goto download_error;
-						}
-						break;
-					case NAK:
-						resend = true;
-					default:
-						break;
-					}
-				}
-				else
-				{
-					safe_delay_ms(500);
-				}
-
-			}
-
-	        cancel_transfer(stream);
-			sprintf(info_msg, "Error: transmit error, char: [%d], retry: [%d]!\r\n", c, retry);
-	        goto download_error;
-		}
+	} else {
+		cancel_transfer(stream);
+		goto download_error;
 	}
+
+	{
+		ChunkIterator iterator(crc, is_stx, block_size);
+
+		// packet 0 with MD5
+		xbuff[0] = SOH;
+		xbuff[1] = 0x00;
+		xbuff[2] = 0xFF;
+		xbuff[3] = strlen(md5_str);
+		memcpy(xbuff + 4, md5_str, strlen(md5_str));
+		memset(xbuff + 4 + strlen(md5_str), CTRLZ, 128 - 4 - strlen(md5_str));
+		unsigned short crc = crc16_ccitt_update(0, xbuff + 3, 128 + 1);
+		xbuff[4 + 128] = crc<<8;
+		xbuff[4 + 128 + 1] = crc&0xff;
+
+		stream->puts((char *)xbuff, 4 + 128 + 2);
+
+		for (;;) {
+			if ((c = inbyte(TIMEOUT_MS, stream)) >= 0) {
+				switch (c) {
+					case 'C':
+					case ACK:
+						packetno++;
+					case NAK:
+						break;
+					case CAN:
+						stream->putc(ACK);
+						sprintf(info_msg, "Info: canceled by remote!\r\n");
+						goto download_error;
+					default:
+						cancel_transfer(stream);
+						goto download_error;
+				}
+			} else {
+				cancel_transfer(stream);
+				goto download_error;
+			}
+
+			size_t position = block_size * (packetno - 1);
+			fseek(fd, position, SEEK_SET);
+
+			if (ftell(fd) < position) {
+				break;
+			}
+
+			iterator.prepare(packetno, fd);
+
+			size_t bytes_read;
+
+			do {
+				bytes_read = iterator.next(xbuff, sizeof(xbuff));
+				if (bytes_read > 0) {
+					stream->puts((char *)xbuff, bytes_read);
+				}
+			} while (bytes_read > 0);
+		}
+
+		// Send End Of Transmission character
+	    stream->putc(XModem::EOT);
+	}
+
+    // Wait for the final ACK from the receiver
+    c = inbyte(TIMEOUT_MS, stream);
+    if (c == ACK) {
+        goto download_success;
+    } else {
+        sprintf(info_msg, "Error: No ACK for EOT, received [%02X]!\r\n", c);
+        goto download_error;
+    }
 
 download_error:
 	if (fd != NULL) {
@@ -614,8 +593,6 @@ download_success:
 		fclose(fd);
 		fd = NULL;
 	}
-
-	flush_input(stream);
 
     if (stream->type() == 0) {
     	set_serial_rx_irq(true);

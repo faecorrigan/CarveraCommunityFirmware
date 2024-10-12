@@ -13,7 +13,7 @@ STX = 0x02  # Start of Text for 8192-byte packets
 EOT = 0x04  # End of Transmission
 ACK = 0x06  # Acknowledge
 NAK = 0x15  # Negative Acknowledge
-CAN = 0x18  # Cancel
+CAN = 0x16  # Cancel
 CRC_CHR = ord('C')  # ASCII 'C' indicates use of CRC
 MAXRETRANS = 20
 TIMEOUT = 10  # seconds
@@ -90,6 +90,7 @@ def get_ack(sock, timeout=TIMEOUT):
         print('Received CANCEL from server')
         sys.exit(1)
     else:
+        print(f"Received {c} from server")
         return None  # Unexpected character
 
 def flush_input(sock):
@@ -160,6 +161,22 @@ def read_all_server_messages(sock, timeout=2):
             return messages.hex()
     return ''
 
+def initial_handshake(sock):
+    """
+    Send two newline characters and wait for an 'ok' response after the second newline.
+    """
+    try:
+        sock.sendall(b'\n')
+
+        response = b''
+        while b'ok' not in response.lower():
+            chunk = sock.recv(1024)
+            if not chunk:
+                raise ConnectionError("Connection closed while waiting for 'ok'.")
+            response += chunk
+    except socket.timeout:
+        raise ConnectionError("Socket timeout during initial handshake.")
+
 def main():
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description='Upload a file to a server using a TCP line-based protocol.')
@@ -188,6 +205,8 @@ def main():
     except Exception as e:
         print(f'Failed to connect to {args.host}:{args.port}: {e}')
         sys.exit(1)
+
+    initial_handshake(sock)
 
     try:
         # Send 'upload $destination_path\n'
@@ -231,13 +250,13 @@ def main():
 
         print('Server ready to receive data')
 
-        # Send MD5 checksum packet using STX (packet type 2)
+        # Send MD5 checksum packet using SOH (packet type 1)
         packet_no = 0
         md5_data = md5sum.encode('ascii')  # 32-byte ASCII string
-        md5_packet = create_packet(packet_no, md5_data, header=STX)
+        md5_packet = create_packet(packet_no, md5_data, header=SOH)
         retransmissions = MAXRETRANS
 
-        print('Sending MD5 checksum packet using STX (8192-byte packet)...')
+        print('Sending MD5 checksum packet using SOH (128-byte packet)...')
         while retransmissions > 0:
             sock.sendall(md5_packet)
             ack = get_ack(sock)
@@ -259,14 +278,14 @@ def main():
             print('Failed to send MD5 checksum packet after maximum retries')
             sys.exit(1)
 
-        # Send data packets with progress bar using SOH (packet type 1)
+        # Send data packets with progress bar using STX (packet type 2)
         packet_no = 1
         index = 0
         print('Starting file upload...')
         with tqdm(total=file_length, unit='B', unit_scale=True, desc='Uploading', ascii=True) as pbar:
             while index < file_length:
-                data_chunk = file_data[index:index + PACKET_SIZE_SOH]
-                packet = create_packet(packet_no, data_chunk, header=SOH)
+                data_chunk = file_data[index:index + PACKET_SIZE_STX]
+                packet = create_packet(packet_no, data_chunk, header=STX)
                 retransmissions = MAXRETRANS
                 while retransmissions > 0:
                     sock.sendall(packet)
@@ -275,14 +294,12 @@ def main():
                         break
                     elif ack is False:
                         retransmissions -= 1
-                        print(f'Packet {packet_no} not acknowledged, retrying... ({MAXRETRANS - retransmissions}/{MAXRETRANS})')
-                        time.sleep(1)
-                        continue
+                        print(f'Packet {packet_no} not acknowledged')
+                        break
                     else:
                         retransmissions -= 1
-                        print(f'Unexpected response for packet {packet_no}, retrying... ({MAXRETRANS - retransmissions}/{MAXRETRANS})')
-                        time.sleep(1)
-                        continue
+                        print(f'Unexpected response for packet {packet_no}')
+                        break
                 if retransmissions == 0:
                     print(f'Failed to send packet {packet_no} after maximum retries')
                     sys.exit(1)
