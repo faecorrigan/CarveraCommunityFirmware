@@ -9,13 +9,13 @@
 #define configUSE_TICK_HOOK             0
 #define configUSE_TIMERS                1
 #define configUSE_COUNTING_SEMAPHORES   1
-#define configTIMER_TASK_STACK_DEPTH    configMINIMAL_STACK_SIZE
+#define configTIMER_TASK_STACK_DEPTH    120
 #define configTIMER_QUEUE_LENGTH        16
 #define configCPU_CLOCK_HZ              ( ( unsigned long ) SystemCoreClock )
 #define configTICK_RATE_HZ              ( ( portTickType ) 1000 )
-#define configMINIMAL_STACK_SIZE        ( ( unsigned short ) 80 )
+#define configMINIMAL_STACK_SIZE        ( ( unsigned short ) 40 )
 #define configMAX_TASK_NAME_LEN	        ( 12 )
-#define configUSE_TRACE_FACILITY        0
+#define configUSE_TRACE_FACILITY        1
 #define configIDLE_SHOULD_YIELD         0
 #define configUSE_CO_ROUTINES           0
 #define configUSE_MUTEXES               1

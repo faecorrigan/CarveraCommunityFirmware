@@ -82,44 +82,45 @@ extern "C" caddr_t   _sbrk(int size);
 
 // command lookup table
 const SimpleShell::ptentry_t SimpleShell::commands_table[] = {
-    {"ls",       &SimpleShell::ls_command},
-    {"cd",       &SimpleShell::cd_command},
-    {"pwd",      &SimpleShell::pwd_command},
-    {"cat",      &SimpleShell::cat_command},
-    {"echo",     &SimpleShell::echo_command},
-    {"rm",       &SimpleShell::rm_command},
-    {"mv",       &SimpleShell::mv_command},
-    {"mkdir",    &SimpleShell::mkdir_command},
-    {"upload",   &SimpleShell::upload_command},
-	{"download", &SimpleShell::download_command},
-    {"reset",    &SimpleShell::reset_command},
-    {"dfu",      &SimpleShell::dfu_command},
-    {"break",    &SimpleShell::break_command},
-    {"help",     &SimpleShell::help_command},
-    {"?",        &SimpleShell::help_command},
-	{"ftype",	 &SimpleShell::ftype_command},
-    {"version",  &SimpleShell::version_command},
-    {"mem",      &SimpleShell::mem_command},
-    {"get",      &SimpleShell::get_command},
-    {"set_temp", &SimpleShell::set_temp_command},
-    {"switch",   &SimpleShell::switch_command},
-    {"net",      &SimpleShell::net_command},
-	{"ap",     &SimpleShell::ap_command},
-	{"wlan",     &SimpleShell::wlan_command},
-	{"diagnose",   &SimpleShell::diagnose_command},
-	{"sleep",   &SimpleShell::sleep_command},
-	{"power",   &SimpleShell::power_command},
-    {"load",     &SimpleShell::load_command},
-    {"save",     &SimpleShell::save_command},
-    {"remount",  &SimpleShell::remount_command},
-    {"calc_thermistor", &SimpleShell::calc_thermistor_command},
-    {"thermistors", &SimpleShell::print_thermistors_command},
-    {"md5sum",   &SimpleShell::md5sum_command},
-	{"time",   &SimpleShell::time_command},
-    {"test",     &SimpleShell::test_command},
+    {"ls",        &SimpleShell::ls_command,        "ls [-s] [-e] [folder] - list directory contents"},
+    {"cd",        &SimpleShell::cd_command,        "cd folder - change directory"},
+    {"pwd",       &SimpleShell::pwd_command,       "pwd - print current working directory"},
+    {"cat",       &SimpleShell::cat_command,       "cat file [limit] [-e] [-d 10] - display file contents"},
+    {"echo",      &SimpleShell::echo_command,      "echo text - display a line of text"},
+    {"rm",        &SimpleShell::rm_command,        "rm file [-e] - remove a file"},
+    {"mv",        &SimpleShell::mv_command,        "mv file newfile [-e] - move/rename a file"},
+    {"mkdir",     &SimpleShell::mkdir_command,     "mkdir directory - create a new directory"},
+    {"upload",    &SimpleShell::upload_command,    "upload filename - save incoming text to a file"},
+    {"download",  &SimpleShell::download_command,  "download filename - download a file"},
+    {"reset",     &SimpleShell::reset_command,     "reset - reboot the system"},
+    {"dfu",       &SimpleShell::dfu_command,       "dfu - enter DFU boot loader mode"},
+    {"break",     &SimpleShell::break_command,     "break - enter debugger"},
+    {"help",      &SimpleShell::help_command,      "help - display available commands"},
+    {"?",         &SimpleShell::help_command,      "? - display available commands"},
+    {"ftype",     &SimpleShell::ftype_command,     "ftype file - display file type"},
+    {"version",   &SimpleShell::version_command,   "version - display firmware version"},
+    {"mem",       &SimpleShell::mem_command,       "mem [-v] - display memory usage"},
+    {"task",      &SimpleShell::task_command,      "task - display task information"},
+    {"get",       &SimpleShell::get_command,       "get [pos|wcs|state|status|fk|ik] - get system info"},
+    {"set_temp",  &SimpleShell::set_temp_command,  "set_temp bed|hotend temp - set temperature"},
+    {"switch",    &SimpleShell::switch_command,    "switch name [value] - control a switch"},
+    {"net",       &SimpleShell::net_command,       "net - display network status"},
+    {"ap",        &SimpleShell::ap_command,        "ap [channel] - configure access point"},
+    {"wlan",      &SimpleShell::wlan_command,      "wlan [ssid] [password] [-d] [-e] - configure WLAN"},
+    {"diagnose",  &SimpleShell::diagnose_command,  "diagnose - run system diagnostics"},
+    {"sleep",     &SimpleShell::sleep_command,     "sleep - enter sleep mode"},
+    {"power",     &SimpleShell::power_command,     "power - manage power settings"},
+    {"load",      &SimpleShell::load_command,      "load [file] - load configuration override file"},
+    {"save",      &SimpleShell::save_command,      "save [file] - save configuration override file"},
+    {"remount",   &SimpleShell::remount_command,   "remount - remount the filesystem"},
+    {"calc_thermistor", &SimpleShell::calc_thermistor_command, "calc_thermistor [-s0] T1,R1,T2,R2,T3,R3 - calculate thermistor coefficients"},
+    {"thermistors", &SimpleShell::print_thermistors_command, "thermistors - list predefined thermistors"},
+    {"md5sum",    &SimpleShell::md5sum_command,    "md5sum file - compute MD5 checksum"},
+    {"time",      &SimpleShell::time_command,      "time - display current time"},
+    {"test",      &SimpleShell::test_command,      "test - run system tests"},
 
-    // unknown command
-    {NULL, NULL}
+    // Unknown command sentinel
+    {nullptr, nullptr, nullptr}
 };
 
 // Adam Greens heap walk from http://mbed.org/forum/mbed/topic/2701/?page=4#comment-22556
@@ -771,6 +772,65 @@ void SimpleShell::mem_command( string parameters, StreamOutput *stream)
     stream->printf("Total Free RAM: %lu bytes\r\n", m + f);
 
     stream->printf("Block size: %u bytes, Tickinfo size: %u bytes\n", sizeof(Block), sizeof(Block::tickinfo_t) * Block::n_actuators);
+}
+
+const char* getTaskStateString(eTaskState state)
+{
+    switch (state)
+    {
+        case eRunning:   return "Running";
+        case eReady:     return "Ready";
+        case eBlocked:   return "Blocked";
+        case eSuspended: return "Suspended";
+        case eDeleted:   return "Deleted";
+        default:         return "Invalid";
+    }
+}
+
+void SimpleShell::task_command(string parameters, StreamOutput *stream)
+{
+    // Get the number of tasks
+    UBaseType_t taskCount = uxTaskGetNumberOfTasks();
+    stream->printf("Total number of tasks: %lu\r\n", (unsigned long)taskCount);
+
+    // Allocate memory for task status information
+    TaskStatus_t *taskStatusArray = (TaskStatus_t *)pvPortMalloc(taskCount * sizeof(TaskStatus_t));
+    if (taskStatusArray == NULL)
+    {
+        stream->printf("Failed to allocate memory for task status array.\r\n");
+        return;
+    }
+
+    // Get task status information
+    UBaseType_t tasksFetched = uxTaskGetSystemState(taskStatusArray, taskCount, NULL);
+
+    // Iterate through each task and print task information with indentation
+    for (UBaseType_t i = 0; i < tasksFetched; i++)
+    {
+        TaskStatus_t *taskStatus = &taskStatusArray[i];
+
+        stream->printf("Task %lu: %s\r\n", (unsigned long)taskStatus->xTaskNumber, taskStatus->pcTaskName);
+        stream->printf("    State: %s\r\n", getTaskStateString(taskStatus->eCurrentState));  // Use the function to display the task state
+        stream->printf("    Base Priority: %lu\r\n", (unsigned long)taskStatus->uxBasePriority);
+        stream->printf("    Current Priority: %lu\r\n", (unsigned long)taskStatus->uxCurrentPriority);
+        stream->printf("    Handle: %p\r\n", taskStatus->xHandle);
+        stream->printf("    Stack: %p\r\n", taskStatus->pxStackBase);
+        stream->printf("    Stack High Water Mark (Unused): %lu bytes\r\n", (unsigned long)taskStatus->usStackHighWaterMark);
+        stream->printf("    Runtime Counter: %lu\r\n", (unsigned long)taskStatus->ulRunTimeCounter);
+
+        #if ( configGENERATE_RUN_TIME_STATS == 1 )
+        // If FreeRTOS runtime stats are enabled, print task CPU usage percentage
+        char cpuUsageBuffer[50];
+        vTaskGetRunTimeStats(cpuUsageBuffer);  // Fill the buffer with CPU stats
+        stream->printf("    CPU Usage:\r\n%s", cpuUsageBuffer);
+        #endif
+
+        // Add additional indentation for better structure
+        stream->printf("\r\n");  // Separate each task block
+    }
+
+    // Free allocated memory
+    vPortFree(taskStatusArray);
 }
 
 static uint32_t getDeviceType()
@@ -1625,16 +1685,14 @@ void SimpleShell::test_command( string parameters, StreamOutput *stream)
         uint32_t sps= strtol(stepspersec.c_str(), NULL, 10);
         sps= std::max(sps, 1UL);
 
-        uint32_t delayus= 1000000.0F / sps;
+        uint32_t delayus = 1000000.0F / sps;
         
         vTaskSuspendAll();
         for(int s= 0;s<steps;s++) {
             if(THEKERNEL.is_halted()) break;
             THEROBOT.actuators[a]->manual_step(dir);
 
-            uint32_t start = us_ticker_read();
-            while ((us_ticker_read() - start) < delayus) 
-                ;
+            wait_us(delayus);
         }
         xTaskResumeAll();
 
@@ -1722,40 +1780,12 @@ void SimpleShell::jog(string parameters, StreamOutput *stream)
     THECONVEYOR.force_queue();
 }
 
-void SimpleShell::help_command( string parameters, StreamOutput *stream )
+void SimpleShell::help_command(string parameters, StreamOutput *stream)
 {
     stream->printf("Commands:\r\n");
-    stream->printf("version\r\n");
-    stream->printf("mem [-v]\r\n");
-    stream->printf("ls [-s] [-e] [folder]\r\n");
-    stream->printf("cd folder\r\n");
-    stream->printf("pwd\r\n");
-    stream->printf("cat file [limit] [-e] [-d 10]\r\n");
-    stream->printf("rm file [-e]\r\n");
-    stream->printf("mv file newfile [-e]\r\n");
-    stream->printf("remount\r\n");
-    stream->printf("play file [-v]\r\n");
-    stream->printf("progress - shows progress of current play\r\n");
-    stream->printf("abort - abort currently playing file\r\n");
-    stream->printf("reset - reset smoothie\r\n");
-    stream->printf("dfu - enter dfu boot loader\r\n");
-    stream->printf("break - break into debugger\r\n");
-    stream->printf("config-get [<configuration_source>] <configuration_setting>\r\n");
-    stream->printf("config-set [<configuration_source>] <configuration_setting> <value>\r\n");
-    stream->printf("get [pos|wcs|state|status|fk|ik]\r\n");
-    stream->printf("get temp [bed|hotend]\r\n");
-    stream->printf("set_temp bed|hotend 185\r\n");
-    stream->printf("switch name [value]\r\n");
-    stream->printf("net\r\n");
-    stream->printf("ap [channel]\r\n");
-    stream->printf("wlan [ssid] [password] [-d] [-e]\r\n");
-    stream->printf("diagnose\r\n");
-    stream->printf("load [file] - loads a configuration override file from soecified name or config-override\r\n");
-    stream->printf("save [file] - saves a configuration override file as specified filename or as config-override\r\n");
-    stream->printf("upload filename - saves a stream of text to the named file\r\n");
-    stream->printf("calc_thermistor [-s0] T1,R1,T2,R2,T3,R3 - calculate the Steinhart Hart coefficients for a thermistor\r\n");
-    stream->printf("thermistors - print out the predefined thermistors\r\n");
-    stream->printf("md5sum file - prints md5 sum of the given file\r\n");
+    for (const ptentry_t* cmd = commands_table; cmd->name != nullptr; ++cmd) {
+        stream->printf("%s\r\n", cmd->help);
+    }
 }
 
 // output all configs

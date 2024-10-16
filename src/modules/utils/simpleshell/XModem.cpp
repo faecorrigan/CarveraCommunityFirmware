@@ -185,232 +185,232 @@ _exit:
 bool XModem::upload(const std::string& filename, StreamOutput* stream) {
     char *recv_buff;
     int expected_length, is_stx = 0;
-	unsigned short crc = 0;
+    unsigned short crc = 0;
     int c, length = 0;
     int recv_count = 0;
-	bool md5_received = false;
+    bool md5_received = false;
     uint32_t u32filesize = 0;
+	MD5 md5;
+    std::string received_md5, computed_md5;
 
-	memset(info_msg, 0, sizeof(info_msg));
+    memset(info_msg, 0, sizeof(info_msg));
 
     string md5_filename = change_to_md5_path(filename);
     string lzfilename = change_to_lz_path(filename);
     check_and_make_path(md5_filename);
     check_and_make_path(lzfilename);
 
-	// diasble serial rx irq in case of serial stream, and internal process in case of wifi
     if (stream->type() == 0) {
-    	set_serial_rx_irq(false);
+        set_serial_rx_irq(false);
     }
 
     if (!THECONVEYOR.is_idle()) {
         stream->putc(EOT);
         if (stream->type() == 0) {
-        	set_serial_rx_irq(true);
+            set_serial_rx_irq(true);
         }
         return false;
     }
 
-	THEKERNEL.set_uploading(true);
+    THEKERNEL.set_uploading(true);
 
-	//if file is lzCompress file,then need to put .lz dir
-	unsigned int start_pos = filename.find(".lz");
-	FILE *fd;
-	if (start_pos != string::npos) {
-		start_pos = lzfilename.rfind(".lz");
-		lzfilename=lzfilename.substr(0, start_pos);
-    	fd = fopen(lzfilename.c_str(), "wb");
+    unsigned int start_pos = filename.find(".lz");
+    FILE *fd;
+    if (start_pos != string::npos) {
+        start_pos = lzfilename.rfind(".lz");
+        lzfilename = lzfilename.substr(0, start_pos);
+        fd = fopen(lzfilename.c_str(), "wb");
+    } else {
+        fd = fopen(filename.c_str(), "wb");
     }
-    else {
-    	fd = fopen(filename.c_str(), "wb");
-    }
-		
+
     FILE *fd_md5 = NULL;
-    //if file is lzCompress file,then need to Decompress
-	start_pos = md5_filename.find(".lz");
-	if (start_pos != string::npos) {
-		md5_filename=md5_filename.substr(0, start_pos);
-	}
-	
+    start_pos = md5_filename.find(".lz");
+    if (start_pos != string::npos) {
+        md5_filename = md5_filename.substr(0, start_pos);
+    }
+
     if (filename.find("firmware.bin") == string::npos) {
-    	fd_md5 = fopen(md5_filename.c_str(), "wb");
+        fd_md5 = fopen(md5_filename.c_str(), "wb");
     }
 
     if (fd == NULL || (filename.find("firmware.bin") == string::npos && fd_md5 == NULL)) {
         stream->putc(EOT);
-    	sprintf(info_msg, "Error: failed to open file [%s]!\r\n", fd == NULL ? filename.substr(0, 30).c_str() : md5_filename.substr(0, 30).c_str() );
-    	goto upload_error;
+        sprintf(info_msg, "Error: failed to open file [%s]!\r\n", fd == NULL ? filename.substr(0, 30).c_str() : md5_filename.substr(0, 30).c_str());
+        goto upload_error;
     }
 
-	stream->putc('C');
-	
-    for (;;) {
-		int retry = 0;
+    stream->putc('C');
 
-		if ((c = inbyte(TIMEOUT_MS, stream)) >= 0) {
-			switch (c) {
-			case SOH:
-				expected_length = 128 + 2; // + CRC16
-				is_stx = 0;
-				goto start_recv;
-			case STX:
-				expected_length = 8192 + 2; // + CRC16
-				is_stx = 1;
-				goto start_recv;
-			case EOT:
-				stream->putc(ACK);
-				goto upload_success; /* normal end */
-			case CAN:
-				stream->putc(ACK);
-				sprintf(info_msg, "Info: Upload canceled by remote!\r\n");
-				goto upload_error;
-				break;
-			default:
-				break;
-			}
-		}
+    for (;;) {
+        int retry = 0;
+
+        if ((c = inbyte(TIMEOUT_MS, stream)) >= 0) {
+            switch (c) {
+                case SOH:
+                    expected_length = 128 + 2; // + CRC16
+                    is_stx = 0;
+                    goto start_recv;
+                case STX:
+                    expected_length = 8192 + 2; // + CRC16
+                    is_stx = 1;
+                    goto start_recv;
+                case EOT:
+                    stream->putc(ACK);
+
+				    computed_md5 = md5.finalize().hexdigest();
+
+				    if (received_md5 != computed_md5) {
+				        sprintf(info_msg, "Error: MD5 verification failed\r\n");
+				        remove(filename.c_str());
+				        goto upload_error;
+				    }
+                    goto upload_success; /* normal end */
+                case CAN:
+                    stream->putc(ACK);
+                    sprintf(info_msg, "Info: Upload canceled by remote!\r\n");
+                    goto upload_error;
+                default:
+                    break;
+            }
+        }
 
         cancel_transfer(stream);
-		sprintf(info_msg, "Error: upload sync error! get char [%d]\r\n", c);
+        sprintf(info_msg, "Error: upload sync error! get char [%d]\r\n", c);
         goto upload_error;
 
     start_recv:
-		size_t header_size = is_stx ? 4 : 3;
-		size_t file_position;
-		int packetno;
-		crc = 0;
+        size_t header_size = is_stx ? 4 : 3;
+        size_t file_position;
+        int packetno;
+        crc = 0;
 
-		retry = 1000;
+        retry = 1000;
 
-		do {
-			c = inbytes(&recv_buff, header_size, TIMEOUT_MS, stream);
-		} while (c == 0 && retry--);
+        do {
+            c = inbytes(&recv_buff, header_size, TIMEOUT_MS, stream);
+        } while (c == 0 && retry--);
 
-		if (c != header_size) {
-			sprintf(info_msg, "Error: header size mismatch: %i != %i\r\n", c, header_size);
-			goto upload_error;
-		}
+        if (c != header_size) {
+            sprintf(info_msg, "Error: header size mismatch: %i != %i\r\n", c, header_size);
+            goto upload_error;
+        }
 
-		if (recv_buff[0] != (unsigned char)(~recv_buff[1])) {
-			sprintf(info_msg, "Error: packet number error\r\n");
-			goto upload_error;	
-		}
+        if (recv_buff[0] != (unsigned char)(~recv_buff[1])) {
+            sprintf(info_msg, "Error: packet number error\r\n");
+            goto upload_error;
+        }
 
-		packetno = recv_buff[0];
+        packetno = recv_buff[0];
 
-		if (is_stx) {
-			length = recv_buff[2] * 256 + recv_buff[3];
-		} else {
-			length = recv_buff[2];
-		}
+        if (is_stx) {
+            length = recv_buff[2] * 256 + recv_buff[3];
+        } else {
+            length = recv_buff[2];
+        }
 
-		crc = crc16_ccitt_update(crc, (unsigned char*)recv_buff + 2, is_stx ? 2 : 1);
+        crc = crc16_ccitt_update(crc, (unsigned char*)recv_buff + 2, is_stx ? 2 : 1);
 
-		// save position in case we need to rewind
-		file_position = ftell(fd);
+        file_position = ftell(fd);
 
-		recv_count = 0;
+        recv_count = 0;
 
-		while (recv_count < expected_length) {
-			retry = 1000;
+        while (recv_count < expected_length) {
+            retry = 1000;
 
-			do {
-				c = inbytes(&recv_buff, expected_length - recv_count, TIMEOUT_MS, stream);
-			} while (c == 0 && retry--);
+            do {
+                c = inbytes(&recv_buff, expected_length - recv_count, TIMEOUT_MS, stream);
+            } while (c == 0 && retry--);
 
-			if (c < 0) {
-				sprintf(info_msg, "Error: could not receive data\r\n");
-				goto upload_error;
-			}
+            if (c < 0) {
+                sprintf(info_msg, "Error: could not receive data\r\n");
+                goto upload_error;
+            }
 
-			recv_count += c;
+            recv_count += c;
 
-			crc = crc16_ccitt_update(crc, (unsigned char*)recv_buff, c);
+            crc = crc16_ccitt_update(crc, (unsigned char*)recv_buff, c);
 
-			if (packetno == 0 && !md5_received) {
-				// packet number 0 contains MD5
-				// packet number might wrap around
-				if (length != 32 || c < 32) {
-					sprintf(info_msg, "Error: could not parse md5 packet\r\n");
-					goto upload_error;	
-				}
+            if (packetno == 0 && !md5_received) {
+                if (length != 32 || c < 32) {
+                    sprintf(info_msg, "Error: could not parse md5 packet\r\n");
+                    goto upload_error;
+                }
+                received_md5.assign(recv_buff, 32);
+                md5_received = true;
+            } else {
+                size_t bytes_to_write = c;
 
-				strncpy(md5_str, recv_buff, 32);
-				fwrite(md5_str, sizeof(char), 32, fd_md5);
+                if (recv_count >= length) {
+                    size_t excess_data = recv_count - c;
+                    bytes_to_write = (length > excess_data) ? (length - excess_data) : 0;
+                }
 
-				md5_received = true;
-			} else {
-				size_t bytes_to_write = c;
+                u32filesize += fwrite(recv_buff, sizeof(char), bytes_to_write, fd);
+                md5.update((unsigned char*)recv_buff, bytes_to_write);
+            }
+        }
 
-				if (recv_count >= length) {
-					size_t excess_data = recv_count - c;
-					bytes_to_write = (length > excess_data) ? (length - excess_data) : 0;
-				}
-
-				u32filesize += fwrite(recv_buff, sizeof(char), bytes_to_write, fd);
-			}
-		}
-
-		if (crc == 0) {
-			stream->putc(ACK);
-		} else {
-			stream->putc(NAK);
-			fseek(fd, file_position, SEEK_SET);
-		}
+        if (crc == 0) {
+            stream->putc(ACK);
+        } else {
+            stream->putc(NAK);
+            fseek(fd, file_position, SEEK_SET);
+        }
     }
 
 upload_error:
-	if (fd != NULL) {
-		fclose(fd);
-		fd = NULL;
-		remove(filename.c_str());
-	}
-	if (fd_md5 != NULL) {
-		fclose(fd_md5);
-		fd_md5 = NULL;
-		remove(md5_filename.c_str());
-	}
-
-	flush_input(stream);
-
-    if (stream->type() == 0) {
-    	set_serial_rx_irq(true);
+    if (fd != NULL) {
+        fclose(fd);
+        fd = NULL;
+        remove(filename.c_str());
     }
 
-	THEKERNEL.set_uploading(false);
+    if (fd_md5 != NULL) {
+        fclose(fd_md5);
+        fd_md5 = NULL;
+        remove(md5_filename.c_str());
+    }
 
-	stream->printf(info_msg);
-	return false;
+    flush_input(stream);
+
+    if (stream->type() == 0) {
+        set_serial_rx_irq(true);
+    }
+
+    THEKERNEL.set_uploading(false);
+
+    stream->printf(info_msg);
+    return false;
 
 upload_success:
-
-	if (fd != NULL) {
-		fclose(fd);
-		fd = NULL;
-	}
-
-	if (fd_md5 != NULL) {
-		fclose(fd_md5);
-		fd_md5 = NULL;
-	}
-	
-	flush_input(stream);
-
-    if (stream->type() == 0) {
-    	set_serial_rx_irq(true);
+    if (fd != NULL) {
+        fclose(fd);
+        fd = NULL;
     }
 
-	THEKERNEL.set_uploading(false);
+    if (fd_md5 != NULL) {
+        fwrite(computed_md5.c_str(), sizeof(char), computed_md5.size(), fd_md5);
+        fclose(fd_md5);
+        fd_md5 = NULL;
+    }
 
-	//if file is lzCompress file, then need to decompress
-	start_pos = filename.find(".lz");
-	string srcfilename = lzfilename;
-	string desfilename = filename;
+    flush_input(stream);
 
-	if (start_pos != string::npos) {
-		desfilename=filename.substr(0, start_pos);
-		if(!decompress(srcfilename, desfilename, u32filesize, stream))
-			return false;
+    if (stream->type() == 0) {
+        set_serial_rx_irq(true);
+    }
+
+    THEKERNEL.set_uploading(false);
+
+    start_pos = filename.find(".lz");
+    string srcfilename = lzfilename;
+    string desfilename = filename;
+
+    if (start_pos != string::npos) {
+        desfilename = filename.substr(0, start_pos);
+        if (!decompress(srcfilename, desfilename, u32filesize, stream))
+            return false;
     }
 
     return true;

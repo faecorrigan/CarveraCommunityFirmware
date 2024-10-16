@@ -135,7 +135,7 @@ OBJECTS += $(OUTDIR)/mbed_custom.o
 
 OBJECTS += $(OUTDIR)/configdefault.o
 
-OBJECTS += $(patsubst %.c,$(OUTDIR)/%.o,$(FREERTOS_SRC))
+OBJECTS += $(patsubst %.c,$(OUTDIR)/freertos/%.o,$(notdir $(FREERTOS_SRC)))
 
 # List of the header dependency files, one per object file.
 DEPFILES = $(patsubst %.o,%.d,$(OBJECTS))
@@ -149,8 +149,13 @@ MRI_DIR  = $(BUILD_DIR)/../mri
 FREERTOS_DIR = $(BUILD_DIR)/../freertos
 
 FREERTOS_PORT = $(FREERTOS_DIR)/portable/GCC/ARM_CM3
-FREERTOS_SRC = $(FREERTOS_DIR)/tasks.c $(FREERTOS_DIR)/queue.c $(FREERTOS_DIR)/list.c $(FREERTOS_DIR)/timers.c $(FREERTOS_DIR)/event_groups.c $(FREERTOS_PORT)/port.c
-# Include path which points to external library headers and to subdirectories of this project which contain headers.
+FREERTOS_SRC = $(FREERTOS_DIR)/tasks.c \
+               $(FREERTOS_DIR)/queue.c \
+               $(FREERTOS_DIR)/list.c \
+               $(FREERTOS_DIR)/timers.c \
+               $(FREERTOS_DIR)/event_groups.c \
+               $(FREERTOS_PORT)/port.c
+
 SUBDIRS = $(wildcard $(SRC)/* $(SRC)/*/* $(SRC)/*/*/* $(SRC)/*/*/*/* $(SRC)/*/*/*/*/* $(SRC)/*/*/*/*/*/*)
 PROJINCS = $(sort $(dir $(SUBDIRS)))
 INCDIRS += $(SRC) $(PROJINCS) $(MRI_DIR)/core $(MBED_DIR) $(MBED_DIR)/$(DEVICE) $(FREERTOS_DIR)/include $(FREERTOS_PORT)
@@ -296,6 +301,17 @@ clean:
 #########################################################################
 #  Default rules to compile .c and .cpp file to .o
 #  and assemble .s files to .o
+
+# Compile FreeRTOS source files into the correct OUTDIR
+$(OUTDIR)/freertos/%.o : $(FREERTOS_DIR)/%.c
+	@echo Compiling $<
+	$(Q) $(MKDIR) $(call convert-slash,$(dir $@)) $(QUIET)
+	$(Q) $(GCC) $(GCFLAGS) -c $< -o $@
+
+$(OUTDIR)/freertos/%.o : $(FREERTOS_PORT)/%.c
+	@echo Compiling $<
+	$(Q) $(MKDIR) $(call convert-slash,$(dir $@)) $(QUIET)
+	$(Q) $(GCC) $(GCFLAGS) -c $< -o $@
 
 $(OUTDIR)/mbed_custom.o : $(BUILD_DIR)/mbed_custom.cpp makefile
 	@echo Compiling $<

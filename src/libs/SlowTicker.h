@@ -4,25 +4,25 @@
 #include "Module.h"
 #include "SoftTimer.h"
 #include "FreeRTOS.h"
-#include "semphr.h"
+#include "task.h"
 
 class SlowTicker : public Module {
-    public:
-        SlowTicker()
-        : timer("SlowTickerTimer", 1000, true, this, &SlowTicker::timerCallback)
-        {
-            semaphore = xSemaphoreCreateCounting(1, 0);
-        }
+public:
+    SlowTicker()
+        : timer("SlowTickerTimer", 1000, true, this, &SlowTicker::timerCallback),
+          taskHandle(nullptr)
+    {
+    }
 
-        void on_module_loaded(void);
-        void on_idle(void*);
-        void start();
+    void on_module_loaded(void);
+    void on_idle(void*);
+    void start();
 
-    private:
-        SoftTimer timer;
-        SemaphoreHandle_t semaphore;
+private:
+    SoftTimer timer;
+    TaskHandle_t taskHandle;
 
-        void timerCallback();
+    void timerCallback();
 };
 
 #endif
